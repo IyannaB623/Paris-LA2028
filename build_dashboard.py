@@ -1,173 +1,99 @@
-"""Build the Paris Airbnb final-analysis dashboard from final_analysis outputs."""
+"""Build dashboard.html from the saved final-analysis tables and charts."""
 from pathlib import Path
-import base64
-import html
+import base64, html, json
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
-ANALYSIS = ROOT / "final_analysis"
+A = ROOT / "final_analysis"
 OUT = ROOT / "analysis_output" / "dashboard.html"
-stats = pd.read_csv(ANALYSIS / "descriptive_statistics.csv")
-counts = pd.read_csv(ANALYSIS / "period_counts.csv")
-reg = pd.read_csv(ANALYSIS / "regression_coefficients.csv")
-slopes = pd.read_csv(ANALYSIS / "model3_slopes.csv")
-sens = pd.read_csv(ANALYSIS / "sensitivity_results.csv")
-revenue = pd.read_csv(ANALYSIS / "revenue_comparison.csv")
-revenue_text = (ANALYSIS / "revenue_presentation_paragraph.md").read_text().strip()
-quality = __import__("json").loads((ANALYSIS / "data_quality.json").read_text())
-revenue_quality = __import__("json").loads((ANALYSIS / "revenue_data_quality.json").read_text())
+stats = pd.read_csv(A / "descriptive_statistics.csv")
+counts = pd.read_csv(A / "period_counts.csv")
+regs = pd.read_csv(A / "regression_coefficients.csv")
+slopes = pd.read_csv(A / "model3_slopes.csv")
+sens = pd.read_csv(A / "sensitivity_results.csv")
+revenue = pd.read_csv(A / "revenue_comparison.csv")
+revenue_full = pd.read_csv(A / "revenue_supplementary_full_sample.csv")
+q = json.loads((A / "data_quality.json").read_text())
+rq = json.loads((A / "revenue_data_quality.json").read_text())
+rev_text = (A / "revenue_presentation_paragraph.md").read_text().strip()
+PRIMARY = "Primary (pooled top 1% price excluded)"
+FULL = "Full valid sample (sensitivity)"
 
-FULL = "Full valid analysis sample"
-P23, P24 = "July–August 2023", "July–August 2024"
-VAR_LABELS = {"price_eur": "Nightly price (EUR)", "occupancy": "Monthly occupancy", "entire_home": "Entire-home indicator"}
-MODEL_LABELS = {"Model 1": "Occupancy ~ price", "Model 2": "Occupancy ~ price + entire-home", "Model 3": "Occupancy ~ price + 2024 + price × 2024 + entire-home"}
-TERM_LABELS = {"const": "Intercept", "price_per_100_eur": "Price (per €100)", "entire_home": "Entire-home control", "period_2024": "2024 period indicator", "price_x_2024": "Price × 2024 interaction"}
-
-def row(frame, **conds):
-    mask = pd.Series(True, index=frame.index)
-    for col, val in conds.items(): mask &= frame[col].eq(val)
-    return frame.loc[mask].iloc[0]
-
-def fmt_eur(x): return f"€{x:,.2f}"
-def fmt_delta_eur(x): return f"-€{abs(x):,.2f}" if x < 0 else f"+€{x:,.2f}"
-def fmt_pct(x): return f"{x:.1%}"
-def fmt_p(x): return "<0.001" if x < .001 else f"{x:.3f}"
-def fmt_pp(x): return f"{x:+.3f} pp"
+def get(frame, **filters):
+    x = frame
+    for k, v in filters.items(): x = x[x[k].eq(v)]
+    return x.iloc[0]
+def euro(x): return f"€{x:,.2f}"
+def delta(x): return ("−" if x < 0 else "+") + f"€{abs(x):,.2f}"
+def pval(x): return "<0.001" if x < .001 else f"{x:.3f}"
+def pct(x): return f"{x:.1%}"
+def pp(x): return f"{x:+.3f} pp"
 def esc(x): return html.escape(str(x))
+def img(name): return "data:image/png;base64," + base64.b64encode((A/name).read_bytes()).decode()
 
-def image_data(filename):
-    payload = base64.b64encode((ANALYSIS / filename).read_bytes()).decode("ascii")
-    return "data:image/png;base64," + payload
+pr = get(stats, sample=PRIMARY, variable="price_eur")
+oc = get(stats, sample=PRIMARY, variable="occupancy")
+home = get(stats, sample=PRIMARY, variable="entire_home")
+N, listings = int(pr.n), int(q["analysis_sample_distinct_listings"])
+period_names = ["July–August 2023", "July–August 2024"]
+period_labels = [x + " — primary trimmed" for x in period_names]
 
-full_price = row(stats, sample=FULL, variable="price_eur")
-full_occ = row(stats, sample=FULL, variable="occupancy")
-full_home = row(stats, sample=FULL, variable="entire_home")
-count_by_period = {r.period: r for r in counts.itertuples(index=False)}
-N = int(full_price.n)
-unique_n = int(quality["analysis_sample_distinct_listings"])
+desc = []
+for sample, label in [(PRIMARY,"Primary overall"),(period_labels[0],"2023 primary"),(period_labels[1],"2024 primary")]:
+    for var, labelvar in [("price_eur","Nightly price (EUR)"),("occupancy","Monthly occupancy"),("entire_home","Entire-home control")]:
+        r=get(stats,sample=sample,variable=var)
+        conv = euro if var == "price_eur" else pct
+        desc.append(f"<tr><td>{esc(label)}</td><td>{labelvar}</td><td>{int(r.n):,}</td><td>{conv(r['mean'])}</td><td>{conv(r['median'])}</td><td>{conv(r['sample_sd'])}</td></tr>")
 
-desc_rows = []
-for sample in [FULL, P23, P24]:
-    subset = stats[stats["sample"].eq(sample)]
-    label = {FULL: "Full analysis sample", P23: "July–August 2023", P24: "July–August 2024"}[sample]
-    for variable in ["price_eur", "occupancy", "entire_home"]:
-        r = subset[subset.variable.eq(variable)].iloc[0]
-        if variable == "price_eur": values = [fmt_eur(r["mean"]), fmt_eur(r["median"]), fmt_eur(r["sample_sd"])]
-        elif variable == "occupancy": values = [fmt_pct(r["mean"]), fmt_pct(r["median"]), fmt_pct(r["sample_sd"])]
-        else: values = [fmt_pct(r["mean"]), fmt_pct(r["median"]), fmt_pct(r["sample_sd"])]
-        desc_rows.append(f"<tr><td>{esc(label)}</td><td>{esc(VAR_LABELS[variable])}</td><td>{int(r['n']):,}</td><td>{values[0]}</td><td>{values[1]}</td><td>{values[2]}</td></tr>")
+terms={"const":"Intercept","price_per_100_eur":"Price (per €100)","entire_home":"Entire-home control","period_2024":"2024 indicator","price_x_2024":"Price × 2024"}
+def regression_rows(sample):
+    out=[]
+    for _,r in regs[regs.analysis_sample.eq(sample)].iterrows():
+        out.append(f"<tr><td>{r.model}</td><td>{terms.get(r.term,r.term)}</td><td>{r.coefficient:+.3f}</td><td>{pval(r.p_value)}</td><td>[{r.ci95_low:+.3f}, {r.ci95_high:+.3f}]</td><td>{int(r.n):,}</td><td>{r.r_squared:.4f}</td></tr>")
+    return "".join(out)
+primary_reg=regression_rows(PRIMARY)
+full_reg=regression_rows(FULL)
+slopedata=slopes[slopes.analysis_sample.eq(PRIMARY)]
+slope_rows="".join(f"<tr><td>{esc(r.contrast)}</td><td>{pp(r.estimate)}</td><td>{pval(r.p_value)}</td><td>[{r.ci95_low:+.3f}, {r.ci95_high:+.3f}]</td></tr>" for _,r in slopedata.iterrows())
+full_diff=get(slopes,analysis_sample=FULL,contrast="2024 minus 2023 slope")
+prim_diff=get(slopes,analysis_sample=PRIMARY,contrast="2024 minus 2023 slope")
+prim_23=get(slopes,analysis_sample=PRIMARY,contrast="2023 price slope")
+prim_24=get(slopes,analysis_sample=PRIMARY,contrast="2024 price slope")
+balanced=get(sens,model="Trimmed primary: listings observed in all four months",term="price_x_2024")
 
-reg_rows = []
-for model in ["Model 1", "Model 2", "Model 3"]:
-    for _, r in reg[reg.model.eq(model)].iterrows():
-        reg_rows.append(
-            f"<tr><td>{esc(model)}</td><td>{esc(TERM_LABELS.get(r.term, r.term))}</td>"
-            f"<td>{r.coefficient:+.3f}</td><td>{fmt_p(r.p_value)}</td>"
-            f"<td>[{r.ci95_low:+.3f}, {r.ci95_high:+.3f}]</td>"
-            f"<td>{int(r.n):,}</td><td>{r.r_squared:.4f}</td></tr>"
-        )
+def revenue_rows(frame, supplementary=False):
+    rows=[]
+    for _,r in frame.iterrows():
+        matched="matched" in r.comparison.lower() or "all four months" in r.comparison.lower()
+        label=("Full-sample matched (supplementary)" if matched else "Full sample (supplementary)") if supplementary else ("Primary matched listings (all four months)" if matched else "Primary trimmed sample")
+        obs=(f"{int(r.listings_2023):,} / {int(r.listings_2024):,} listings" if not matched else f"{int(r.listings_2023):,} matched listings/year")
+        rows.append(f"<tr><td>{label}</td><td>{esc(r.metric)}</td><td>{obs}</td><td>{euro(r.mean_2023_eur)} / {euro(r.median_2023_eur)}</td><td>{euro(r.mean_2024_eur)} / {euro(r.median_2024_eur)}</td><td>{delta(r.mean_difference_2024_minus_2023_eur)} ({r.mean_change_pct:+.1f}%)</td><td>{delta(r.median_difference_2024_minus_2023_eur)} ({r.median_change_pct:+.1f}%)</td></tr>")
+    return "".join(rows)
 
-slope_rows = []
-for _, r in slopes.iterrows():
-    slope_rows.append(f"<tr><td>{esc(r.contrast)}</td><td>{fmt_pp(r.estimate)}</td><td>{fmt_p(r.p_value)}</td><td>[{r.ci95_low:+.3f}, {r.ci95_high:+.3f}]</td></tr>")
+period_cards=[]
+for name, label in zip(period_names,period_labels):
+    c=get(counts,period=name); p=get(stats,sample=label,variable="price_eur"); o=get(stats,sample=label,variable="occupancy")
+    period_cards.append(f"<article class='card'><h3>{name}</h3><p>{int(c.observations):,} listing-months · {int(c.distinct_listings):,} distinct listings</p><p>Price mean/median: {euro(p['mean'])} / {euro(p['median'])}</p><p>Occupancy mean/median: {pct(o['mean'])} / {pct(o['median'])}</p></article>")
 
-sens_label = "Exclude top 1% by price"
-sens_slope23 = row(sens, model=sens_label, term="2023 slope")
-sens_slope24 = row(sens, model=sens_label, term="2024 slope")
-sens_diff = row(sens, model=sens_label, term="slope difference")
-bal_diff = row(sens, model="Listings observed in all four months", term="slope difference")
-top_n = N - int(row(sens, model=sens_label, term="const").n)
+chart_specs=[("price_histogram_pooled_q99.png","Full valid sample: native nightly price; dashed marker is pooled q99"),("scatter_occupancy_price.png","Primary sample: actual occupancy against nightly price, split by period"),("period_split_distributions.png","Primary sample: price and occupancy distributions by period"),("period_mean_occupancy.png","Primary sample: mean occupancy by period"),("revenue_comparison.png","Primary sample: recorded revenue comparisons")]
+hist_chart=f"<article class='card chart'><h3>{chart_specs[0][1]}</h3><img src='{img(chart_specs[0][0])}' alt='{esc(chart_specs[0][1])}'></article>"
+charts="".join(f"<article class='card chart'><h3>{title}</h3><img src='{img(file)}' alt='{esc(title)}'></article>" for file,title in chart_specs[1:])
 
-revenue_rows = []
-for _, r in revenue.iterrows():
-    if r.comparison == "Full study sample":
-        sample_label = "Full study sample"
-        units = f"{int(r.n_2023):,} / {int(r.n_2024):,} listing-months; {int(r.listings_2023):,} / {int(r.listings_2024):,} listings"
-    else:
-        sample_label = "Matched listings (four months)"
-        units = f"{int(r.n_2023):,} / {int(r.n_2024):,} listing-years; {int(r.listings_2023):,} matched listings each year"
-    revenue_rows.append(
-        f"<tr><td>{esc(sample_label)}</td><td>{esc(r.metric)}</td><td>{units}</td>"
-        f"<td>{fmt_eur(r.mean_2023_eur)}<br><small>median {fmt_eur(r.median_2023_eur)}</small></td>"
-        f"<td>{fmt_eur(r.mean_2024_eur)}<br><small>median {fmt_eur(r.median_2024_eur)}</small></td>"
-        f"<td>{fmt_delta_eur(r.mean_difference_2024_minus_2023_eur)} ({r.mean_change_pct:+.1f}%)</td>"
-        f"<td>{fmt_delta_eur(r.median_difference_2024_minus_2023_eur)} ({r.median_change_pct:+.1f}%)</td></tr>"
-    )
-
-period_table = []
-for p, year in [(P23, "2023"), (P24, "2024")]:
-    c = count_by_period[p]
-    pr = row(stats, sample=p, variable="price_eur")
-    oc = row(stats, sample=p, variable="occupancy")
-    period_table.append(f'''<div class="card period"><h3><span class="dot {'blue' if year == '2023' else 'red'}">●</span> July–August {year}</h3>
-      <div class="metricrow"><span>Listing-month observations</span><b>{int(c.observations):,}</b></div>
-      <div class="metricrow"><span>Distinct listings</span><b>{int(c.distinct_listings):,}</b></div>
-      <div class="metricrow"><span>Mean nightly price</span><b>{fmt_eur(pr['mean'])}</b></div>
-      <div class="metricrow"><span>Median nightly price</span><b>{fmt_eur(pr['median'])}</b></div>
-      <div class="metricrow"><span>Mean occupancy</span><b>{fmt_pct(oc['mean'])}</b></div>
-      <div class="metricrow"><span>Median occupancy</span><b>{fmt_pct(oc['median'])}</b></div></div>''')
-
-imgs = {
-    "scatter": image_data("scatter_occupancy_price.png"),
-    "split": image_data("period_split_distributions.png"),
-    "occupancy": image_data("period_mean_occupancy.png"),
-    "revenue": image_data("revenue_comparison.png"),
-}
-
-doc = f'''<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pricing the Games | Paris Airbnb final analysis</title>
+doc=f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Paris Airbnb | DSO 510 Final Analysis</title>
 <style>
-:root{{--ink:#18212f;--muted:#657184;--paper:#f3f5f8;--card:#fff;--line:#e4e8ef;--blue:#315a83;--red:#d95b5b;--green:#4d8d60}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
-main{{max-width:1440px;margin:auto;padding:36px 38px 54px}}header{{background:#17283d;color:white;border-radius:20px;padding:36px 42px;position:relative;overflow:hidden}}header:after{{content:"";position:absolute;width:420px;height:420px;border-radius:50%;right:-100px;top:-240px;background:#315a83;opacity:.55}}.eyebrow{{text-transform:uppercase;letter-spacing:.14em;font-size:12px;color:#b5c9dd;font-weight:700}}h1{{font-size:clamp(28px,4vw,44px);line-height:1.1;margin:12px 0 10px;max-width:860px}}header p{{color:#d4deea;margin:0;max-width:900px}}.headerrow{{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;position:relative;z-index:1}}.actions{{display:flex;gap:10px;flex-wrap:wrap}}button{{border:1px solid #ffffff55;border-radius:9px;background:#ffffff12;color:white;padding:10px 14px;font-weight:650;cursor:pointer}}
-.section{{margin-top:28px}}.sectionhead{{display:flex;justify-content:space-between;gap:20px;align-items:end;margin:0 2px 13px}}h2{{margin:0;font-size:21px}}.sub{{color:var(--muted);font-size:13px;margin:4px 0 0}}.grid{{display:grid;gap:16px}}.kpis{{grid-template-columns:repeat(4,minmax(0,1fr))}}.card{{background:var(--card);border:1px solid var(--line);border-radius:15px;box-shadow:0 5px 18px #18212f08}}.kpi{{padding:19px 21px}}.label{{font-size:12px;font-weight:700;letter-spacing:.045em;color:var(--muted);text-transform:uppercase}}.kpi strong{{display:block;font-size:30px;letter-spacing:-.03em;margin-top:4px}}.kpi small{{color:var(--muted)}}.periodcards,.chartgrid,.split{{grid-template-columns:1fr 1fr}}.period{{padding:21px 23px}}.period h3{{margin:0 0 14px}}.metricrow{{display:flex;justify-content:space-between;border-top:1px solid var(--line);padding:9px 0;gap:18px}}.metricrow span{{color:var(--muted)}}.metricrow b{{text-align:right}}.dot.blue{{color:var(--blue)}}.dot.red{{color:var(--red)}}.chart{{padding:14px 16px 12px}}.chart img{{display:block;width:100%;height:auto}}.chart h3{{margin:0 0 5px;font-size:16px}}.tablewrap{{overflow:auto}}table{{border-collapse:collapse;width:100%;min-width:760px;font-size:13px}}th,td{{padding:10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}}thead th{{position:sticky;top:0;background:#f6f8fb;color:#526074;font-size:11px;text-transform:uppercase;letter-spacing:.03em}}th:first-child,td:first-child{{text-align:left}}.table-note{{padding:12px 16px;color:var(--muted);font-size:12px}}.findings{{padding:23px 26px}}.findings ul{{margin:10px 0 0;padding-left:20px}}.findings li{{margin:8px 0}}.notes{{grid-template-columns:repeat(3,1fr)}}.note{{padding:20px 22px}}.note h3{{margin:0 0 8px;font-size:15px}}.note p{{font-size:13px;color:var(--muted);margin:0}}.callout{{padding:20px 22px}}.callout p{{margin:5px 0;color:var(--muted)}}.tag{{display:inline-block;font-size:11px;padding:4px 8px;border-radius:20px;background:#f0f3f7;color:#526074;margin-left:6px}}footer{{color:var(--muted);font-size:12px;margin:23px 2px 0;display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap}}
-@media(max-width:900px){{main{{padding:18px}}.kpis{{grid-template-columns:repeat(2,1fr)}}.chartgrid,.split,.notes{{grid-template-columns:1fr}}header{{padding:27px}}.headerrow{{display:block}}.actions{{margin-top:18px}}}}@media(max-width:520px){{.kpis,.periodcards{{grid-template-columns:1fr}}.kpi strong{{font-size:26px}}}}
-@media print{{body{{background:white}}main{{max-width:none;padding:0}}header{{border-radius:0;print-color-adjust:exact;-webkit-print-color-adjust:exact}}.actions{{display:none}}.card{{break-inside:avoid;box-shadow:none}}.section{{break-inside:avoid-page}}.tablewrap{{overflow:visible}}table{{min-width:0;font-size:8px}}th,td{{padding:5px 3px}}thead th{{position:static}}}}
-</style></head><body><main>
-<header><div class="headerrow"><div><div class="eyebrow">Final analysis · Paris Airbnb · July–August comparison</div><h1>Pricing the Games</h1><p>Are higher nightly prices associated with lower occupancy, and did the price–occupancy relationship differ in July–August 2024 from the same months in 2023?<br>For hosts considering major-event pricing; these results describe associations and do not identify an optimal price.</p></div><div class="actions"><button onclick="window.print()">Print / Save as PDF</button></div></div></header>
-<section class="section"><div class="sectionhead"><div><h2>At a glance</h2><p class="sub">Same valid sample used in all three regressions · listing-month unit</p></div></div><div class="grid kpis">
-<div class="card kpi"><div class="label">Analysis observations</div><strong>{N:,}</strong><small>listing-months across four study months</small></div>
-<div class="card kpi"><div class="label">Distinct selected listings</div><strong>{unique_n:,}</strong><small>9,114 is the full source count</small></div>
-<div class="card kpi"><div class="label">Mean nightly price</div><strong>{fmt_eur(full_price['mean'])}</strong><small>median {fmt_eur(full_price['median'])} · native EUR rate</small></div>
-<div class="card kpi"><div class="label">Mean occupancy</div><strong>{fmt_pct(full_occ['mean'])}</strong><small>median {fmt_pct(full_occ['median'])} · zeros retained</small></div>
-</div></section>
-<section class="section"><div class="sectionhead"><div><h2>Period comparison</h2><p class="sub">Period listing counts are distinct within each year; a listing may appear in both years.</p></div></div><div class="grid periodcards">{''.join(period_table)}</div></section>
-<section class="section"><div class="sectionhead"><div><h2>Updated charts</h2><p class="sub">Full valid analysis sample; scatterplot points are actual listing-month observations.</p></div></div><div class="grid chartgrid">
-<div class="card chart"><h3>Occupancy against nightly price, split by period</h3><img src="{imgs['scatter']}" alt="Scatterplot of actual occupancy observations against price by period"></div>
-<div class="card chart"><h3>Price and occupancy distributions by period</h3><img src="{imgs['split']}" alt="Price and occupancy distribution comparison by study period"></div>
-<div class="card chart"><h3>Mean occupancy by period</h3><img src="{imgs['occupancy']}" alt="Mean occupancy for 2023 and 2024"></div>
-</div></section>
-<section class="section"><div class="sectionhead"><div><h2>Descriptive statistics</h2><p class="sub">Sample standard deviation. Occupancy and entire-home are proportions shown as percentages; entire-home is 1 for entire_home listings.</p></div></div><div class="card tablewrap"><table><thead><tr><th>Sample</th><th>Variable</th><th>N</th><th>Mean</th><th>Median</th><th>Sample SD</th></tr></thead><tbody>{''.join(desc_rows)}</tbody></table><div class="table-note">Price is EUR/night. Occupancy is stored from 0 to 1. Entire-home is a 0/1 control.</div></div></section>
-<section class="section"><div class="sectionhead"><div><h2>Three clustered OLS regressions</h2><p class="sub">Coefficients for price are occupancy percentage points per €100 higher nightly price. 95% confidence intervals and p-values use standard errors clustered by listing ID.</p></div></div><div class="card tablewrap"><table><thead><tr><th>Model</th><th>Term</th><th>Coefficient</th><th>p-value</th><th>95% CI</th><th>N</th><th>R²</th></tr></thead><tbody>{''.join(reg_rows)}</tbody></table><div class="table-note">All models use N={N:,} observations ({unique_n:,} listing clusters). Clustering accounts for repeated months from the same listing. Model 1: price only. Model 2: adds entire-home. Model 3: adds 2024 and price × 2024.</div></div></section>
-<section class="section"><div class="sectionhead"><div><h2>Model 3: price slopes by period</h2><p class="sub">Linear combinations and their uncertainty use the Model 3 covariance matrix.</p></div></div><div class="card tablewrap"><table><thead><tr><th>Estimate</th><th>Slope / difference</th><th>p-value</th><th>95% CI</th></tr></thead><tbody>{''.join(slope_rows)}</tbody></table><div class="table-note">Slopes are occupancy percentage points per €100 higher price. The “2024 minus 2023” row tests whether the slopes differ.</div></div></section>
-<section class="section"><div class="sectionhead"><div><h2>Supporting question: recorded gross revenue</h2><p class="sub">Per-listing comparisons, not market totals. The original occupancy research question and three regressions remain the primary analysis.</p></div></div>
-<div class="card chart"><h3>Mean recorded gross revenue in July–August</h3><img src="{imgs['revenue']}" alt="Mean monthly gross revenue per listing and gross revenue per calendar night for full and matched samples in 2023 and 2024"></div>
-<div class="card tablewrap" style="margin-top:16px"><table><thead><tr><th>Sample</th><th>Measure</th><th>Observations and listings (2023 / 2024)</th><th>2023 mean / median</th><th>2024 mean / median</th><th>Mean change</th><th>Median change</th></tr></thead><tbody>{''.join(revenue_rows)}</tbody></table>
-<div class="table-note">Matched sample requires the same listing observed in July and August of both years. July and August are averaged within each listing-year. Calendar-night revenue divides native monthly revenue by the month's calendar days, never by available_days. {revenue_quality['native_revenue_zero_rows_retained']:,} zero-revenue rows are retained; missing revenue is not imputed ({revenue_quality['native_revenue_missing_rows']} missing in this sample).</div></div>
-<div class="card findings" style="margin-top:16px"><h3>Presentation-ready wording</h3><p>{esc(revenue_text)}</p><p>Recorded gross revenue is not profit. These are observational comparisons: they do not show that price changes caused revenue changes and do not identify an optimal LA price.</p></div>
-<div class="card callout" style="margin-top:16px"><h3>Revenue field assumption</h3><p>All study rows report EUR, but `revenue` and `native_revenue` differ (median ratio {revenue_quality['median_revenue_to_native_revenue_ratio']:.3f}). The analysis uses `native_revenue` as EUR, consistently with the `native_avg_daily_rate` assumption. The exact dataset's field-level documentation is incomplete, so this is an explicit assumption; see `final_analysis/revenue_method_notes.md`.</p></div></section>
-<section class="section"><div class="sectionhead"><div><h2>What the results mean</h2><p class="sub">Observed estimates, separated from theory-based expectations.</p></div></div><div class="grid split">
-<div class="card findings"><h3>Observed findings</h3><ul>
-<li>The unadjusted and entire-home-adjusted price slopes are small and statistically uncertain. Their confidence intervals include zero.</li>
-<li>In Model 3, neither year’s price slope nor the difference between them is statistically clear at the 5% level. The data do not show a reliable change in the price relationship between these periods.</li>
-<li>Mean occupancy is lower and mean price is higher in the 2024 sample, but that period contrast alone does not establish that price changes caused occupancy to change.</li>
-<li>For hosts, these estimates do not give an exact best price for Paris or LA. Listing quality, location, timing, availability, and demand could also shape the observed association.</li></ul></div>
-<div class="card findings"><h3>Competing expectations</h3><ul>
-<li>A ticket-driven demand surge and fewer substitutes could make guests less price-sensitive in 2024, weakening a negative price slope.</li>
-<li>A surge in supply or overpricing against expected demand could strengthen a negative price slope as some listings remain unbooked.</li>
-<li>These are theory-based competing predictions, not preregistered expectations. The main interaction estimate does not clearly distinguish them.</li></ul></div>
-</div></section>
-<section class="section"><div class="sectionhead"><div><h2>Sensitivity and measurement notes</h2><p class="sub">The full valid sample remains the primary analysis.</p></div></div><div class="grid notes">
-<div class="card note"><h3>Price field and currency assumption</h3><p>Every selected row reports currency EUR, but avg_daily_rate and native_avg_daily_rate differ. The analysis uses native_avg_daily_rate as EUR/night, based on its native-currency name and the EUR field. The exact Kaggle file does not document why the fields differ, so this is an explicit assumption. Both values are preserved in the cleaned CSV. The corrected period mean prices are {fmt_eur(row(stats,sample=P23,variable='price_eur')['mean'])} (2023) and {fmt_eur(row(stats,sample=P24,variable='price_eur')['mean'])} (2024); earlier slides used the other field.</p></div>
-<div class="card note"><h3>Highest-price sensitivity</h3><p>Dropping the top 1% ({top_n:,} observations; prices above about {fmt_eur(quality['price_top_1pct_threshold_eur'])}) changes the estimated slope difference to {fmt_pp(sens_diff.coefficient)} (p={fmt_p(sens_diff.p_value)}; 95% CI [{sens_diff.ci95_low:+.3f}, {sens_diff.ci95_high:+.3f}]). This negative difference is statistically detectable in that sensitivity but not the full sample; the inference is sensitive to the highest prices.</p><p>Top-1% slopes: 2023 {fmt_pp(sens_slope23.coefficient)}; 2024 {fmt_pp(sens_slope24.coefficient)}.</p></div>
-<div class="card note"><h3>Other data choices</h3><p>The selected sample has {int(quality['selected_zero_occupancy']):,} zero-occupancy rows, retained. `active` was not used to exclude rows because some inactive records have positive occupancy and some active records have zero occupancy. Bedrooms was omitted: {int(quality['bedrooms_missing']):,} values are missing and some are unusually large. Entire-home is the common control, plausibly related to both price and demand.</p><p>For listings present in all four months, the slope difference is {fmt_pp(bal_diff.coefficient)} (p={fmt_p(bal_diff.p_value)}), consistent with the full-sample inference.</p></div>
-</div></section>
-<section class="section"><div class="card callout"><h3>Important limitations</h3><p>Monthly records combine dates outside the Olympic Games and cannot isolate event days. The year samples differ in size and listing composition. Location, property quality, amenities, timing, minimum stays, and availability may influence both price and occupancy. For example, better locations or higher-quality homes may charge more and attract more bookings, pushing the estimated price association upward (less negative) relative to a causal effect. Listing-clustered errors account for repeated observations, not confounding.</p><p>The downloaded Kaggle dataset page provides no readable field-level documentation in this review. An analogous past-calendar schema defines a native rate as an average daily rate in native currency; the applied EUR interpretation is therefore an assumption based on that convention and the sample currency column.</p></div></section>
-<footer><span>DSO 510 · Paris Airbnb final analysis · Source: past_rates.csv</span><span>Built from saved files in final_analysis/</span></footer>
-</main></body></html>'''
-
-OUT.parent.mkdir(parents=True, exist_ok=True)
-OUT.write_text(doc, encoding="utf-8")
+:root{{--ink:#18212f;--muted:#657184;--paper:#f3f5f8;--line:#e4e8ef;--blue:#315a83}}*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}main{{max-width:1440px;margin:auto;padding:34px}}header{{background:#17283d;color:white;border-radius:20px;padding:34px 40px}}h1{{font-size:40px;margin:8px 0}}header p{{color:#d4deea;max-width:950px}}h2{{font-size:22px;margin-bottom:4px}}h3{{margin:0 0 8px}}.section{{margin-top:28px}}.sub,.muted{{color:var(--muted);font-size:13px}}.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}}.kpis{{grid-template-columns:repeat(4,minmax(0,1fr))}}.card{{background:white;border:1px solid var(--line);border-radius:15px;padding:20px;box-shadow:0 5px 18px #18212f08}}.kpi strong{{font-size:29px;display:block}}.kpi span{{font-size:12px;color:var(--muted);text-transform:uppercase;font-weight:700}}.chart img{{width:100%;height:auto;display:block}}.tablewrap{{overflow:auto;padding:0}}table{{width:100%;border-collapse:collapse;min-width:790px;font-size:13px}}th,td{{text-align:right;padding:9px;border-bottom:1px solid var(--line);white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}th{{background:#f6f8fb;text-transform:uppercase;font-size:11px;color:#526074}}.table-note{{padding:12px;color:var(--muted);font-size:12px}}.callout{{padding:20px}}footer{{padding:20px;color:var(--muted);font-size:12px}}@media(max-width:850px){{main{{padding:15px}}.grid,.kpis{{grid-template-columns:1fr}}header{{padding:25px}}}}
+</style></head><body><main><header><small>DSO 510 · Final analysis · Paris Airbnb</small><h1>Pricing the Games</h1><p>Are higher nightly prices associated with lower occupancy, and did that relationship differ between July–August 2023 and July–August 2024? These observational estimates do not establish causation or identify an optimal price for Los Angeles.</p></header>
+<section class="section"><h2>Primary analysis at a glance</h2><p class="sub">The pooled 99th-percentile price-trimmed sample is primary. All three models use the same listing-month sample.</p><div class="grid kpis"><article class="card kpi"><span>Listing-months</span><strong>{N:,}</strong></article><article class="card kpi"><span>Distinct listings</span><strong>{listings:,}</strong><small>9,114 is the full source count</small></article><article class="card kpi"><span>Mean nightly price</span><strong>{euro(pr['mean'])}</strong><small>median {euro(pr['median'])} · assumed EUR</small></article><article class="card kpi"><span>Mean occupancy</span><strong>{pct(oc['mean'])}</strong><small>median {pct(oc['median'])} · genuine zeros retained</small></article></div></section>
+<section class="section"><h2>Pooled price cutoff</h2><p class="sub">Cutoff calculated once across the full valid July–August 2023/2024 sample, then applied unchanged to both periods.</p><div class="grid">{hist_chart}</div><div class="card callout"><b>99th-percentile cutoff: {euro(q['pooled_price_q99_eur'])} per night.</b> This removes {q['pooled_price_q99_rows_removed']:,} of {q['full_valid_sample_rows']:,} valid rows ({q['pooled_price_q99_pct_removed']:.2f}% — just over 1% because of quantile ties), leaving {N:,} rows and {listings:,} listings for primary analysis.</div></section>
+<section class="section"><h2>Period counts and descriptive statistics</h2><div class="grid">{''.join(period_cards)}</div><p class="sub">Sample SD; occupancy and entire-home are percentages. Entire-home indicator is 1 for entire_home listings.</p><div class="card tablewrap"><table><thead><tr><th>Sample</th><th>Variable</th><th>N</th><th>Mean</th><th>Median</th><th>Sample SD</th></tr></thead><tbody>{''.join(desc)}</tbody></table><div class="table-note">Price is native nightly rate assumed EUR; occupancy is a monthly proportion; control is a 0/1 variable.</div></div></section>
+<section class="section"><h2>Primary analysis charts</h2><div class="grid">{charts}</div></section>
+<section class="section"><h2>Three required listing-clustered OLS regressions</h2><p class="sub">Price effects are occupancy percentage points per €100 higher nightly price. Standard errors cluster by listing ID to account for repeated listing-month records.</p><div class="card tablewrap"><table><thead><tr><th>Model</th><th>Term</th><th>Coefficient</th><th>p-value</th><th>95% CI</th><th>N</th><th>R²</th></tr></thead><tbody>{primary_reg}</tbody></table><div class="table-note">Models: (1) price; (2) price + entire-home; (3) price + 2024 period + price × 2024 + entire-home. Entire-home effects are in occupancy percentage points.</div></div></section>
+<section class="section"><h2>Model 3 price slopes</h2><div class="card tablewrap"><table><thead><tr><th>Estimate</th><th>Effect per €100</th><th>p-value</th><th>95% CI</th></tr></thead><tbody>{slope_rows}</tbody></table><div class="table-note">The primary estimates are 2023 {pp(prim_23.estimate)} (p={pval(prim_23.p_value)}; CI {prim_23.ci95_low:+.3f} to {prim_23.ci95_high:+.3f}), 2024 {pp(prim_24.estimate)} (p={pval(prim_24.p_value)}; CI {prim_24.ci95_low:+.3f} to {prim_24.ci95_high:+.3f}). Difference {pp(prim_diff.estimate)} (p={pval(prim_diff.p_value)}; CI {prim_diff.ci95_low:+.3f} to {prim_diff.ci95_high:+.3f}); these are linear combinations using the model covariance matrix.</div></div></section>
+<section class="section"><h2>Full-sample regression sensitivity</h2><p class="sub">Estimates before excluding prices above q99; retain as a clearly labeled sensitivity comparison.</p><div class="card tablewrap"><table><thead><tr><th>Model</th><th>Term</th><th>Coefficient</th><th>p-value</th><th>95% CI</th><th>N</th><th>R²</th></tr></thead><tbody>{full_reg}</tbody></table><div class="table-note">Full-sample Model 3 interaction: {pp(full_diff.estimate)}, p={pval(full_diff.p_value)}, 95% CI [{full_diff.ci95_low:+.3f}, {full_diff.ci95_high:+.3f}], versus primary {pp(prim_diff.estimate)}, p={pval(prim_diff.p_value)}, 95% CI [{prim_diff.ci95_low:+.3f}, {prim_diff.ci95_high:+.3f}]. The sign and inference change; conclusions are sensitive to high-price observations.</div></div></section>
+<section class="section"><h2>Supporting question: recorded gross revenue</h2><p class="sub">Per-listing averages rather than market totals. Gross revenue is not profit; comparisons are observational.</p><div class="card tablewrap"><table><thead><tr><th>Sample</th><th>Measure</th><th>Listings (2023 / 2024)</th><th>2023 mean / median</th><th>2024 mean / median</th><th>Mean change</th><th>Median change</th></tr></thead><tbody>{revenue_rows(revenue)}</tbody></table><div class="table-note">Matched comparison averages July and August within each listing-year. Primary matched panel has {int(balanced.distinct_listings):,} listings and {int(balanced.n):,} listing-months; each listing has all four months after trimming. Calendar-night revenue divides monthly native_revenue by calendar days, never available_days. {rq['primary_native_revenue_zero_rows_retained']:,} zero-revenue observations retained; {rq['primary_native_revenue_missing_rows']} missing values are not imputed.</div></div><div class="card tablewrap" style="margin-top:14px"><h3>Full-sample comparisons (supplementary)</h3><table><thead><tr><th>Sample</th><th>Measure</th><th>Listings (2023 / 2024)</th><th>2023 mean / median</th><th>2024 mean / median</th><th>Mean change</th><th>Median change</th></tr></thead><tbody>{revenue_rows(revenue_full,True)}</tbody></table></div><div class="card callout" style="margin-top:14px"><b>Presentation wording</b><p>{esc(rev_text)}</p><p>For LA 2028 hosts, this adds a gross-revenue comparison alongside occupancy, but it cannot show that price changes caused the revenue pattern. Paris does not identify an optimal LA price.</p></div></section>
+<section class="section"><h2>Interpretation, hypotheses, and limitations</h2><div class="grid"><article class="card"><h3>Observed findings</h3><p>Models 1 and 2 show small, statistically uncertain price slopes. In Model 3, the trimmed-sample price slopes are positive in both periods: +1.753 pp per €100 in 2023 and +0.828 in 2024. The 2024-minus-2023 difference is −0.925 pp (p=.039; CI −1.802 to −0.048). That is opposite a simple negative price–occupancy hypothesis, but it is not causal evidence. The matched four-month primary interaction is {pp(balanced.coefficient)} (p={pval(balanced.p_value)}; CI {balanced.ci95_low:+.3f} to {balanced.ci95_high:+.3f}), not statistically clear.</p></article><article class="card"><h3>Theory-based expectations</h3><p>Event demand and fewer substitutes might weaken price sensitivity, while added supply or overpricing could strengthen a negative association. These competing expectations were theory-based, not preregistered; the full-sample comparison also demonstrates sensitivity to extreme prices.</p></article><article class="card"><h3>Currency and control assumptions</h3><p>Selected records state EUR. We use native_avg_daily_rate as euros/night, retaining avg_daily_rate for comparison because fields differ and file-specific documentation is incomplete. Entire-home is the control because property type can relate to both price and demand. Bedrooms has about 13% missing and extreme values, so it is not used.</p></article><article class="card"><h3>Limitations</h3><p>Monthly records do not isolate event dates. Year samples differ in composition. Location and property quality may raise both prices and bookings, biasing the observed price association upward (less negative). Availability, timing, amenities, and host strategy are unobserved; listing-clustered errors do not remove confounding. These results do not estimate a causal effect or an optimal LA price.</p></article></div></section>
+<footer>DSO 510 · Source: past_rates.csv · Generated from saved final_analysis tables and charts</footer></main></body></html>'''
+OUT.parent.mkdir(parents=True,exist_ok=True)
+OUT.write_text(doc,encoding="utf-8")
 print(f"Wrote {OUT} ({OUT.stat().st_size:,} bytes)")
-print(f"Loaded: N={N:,}, listings={unique_n:,}; model rows={len(reg):,}; chart files=4")
+print(f"Primary N={N:,}; listings={listings:,}; q99={euro(q['pooled_price_q99_eur'])}; chart images=5")

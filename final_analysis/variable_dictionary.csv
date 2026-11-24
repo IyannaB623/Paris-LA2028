@@ -17,3 +17,5 @@ avg_daily_rate,undocumented units/night,"Second source price field; preserved, n
 native_avg_daily_rate,native currency/night,"Selected EUR rate, assuming native currency follows currency field; documentation incomplete."
 revenue,source currency,Source gross-revenue measure; currency/conversion semantics are not documented for this exact file; preserved for comparison.
 native_revenue,native currency,"Source native gross-revenue measure; used as EUR because selected rows report currency=EUR, under an explicit assumption."
+price_above_pooled_q99,0/1,True when native price exceeds the pooled full-study-sample 99th percentile; cutoff is applied identically to both years.
+in_primary_trimmed_sample,0/1,True when native price is at or below the pooled q99 cutoff; rows above are excluded from primary regressions.

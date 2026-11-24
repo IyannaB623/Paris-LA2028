@@ -28,8 +28,16 @@
   "bedroom_analysis_sample_rows_if_complete": 18358,
   "all_four_month_listings": 2407,
   "all_four_month_rows": 9628,
-  "analysis_sample_rows": 21172,
-  "analysis_sample_distinct_listings": 8179,
-  "analysis_removals_from_selected": 0,
-  "price_top_1pct_threshold_eur": 1090.5800000000017
+  "full_valid_sample_rows": 21172,
+  "full_valid_sample_distinct_listings": 8179,
+  "analysis_sample_rows": 20960,
+  "analysis_sample_distinct_listings": 8127,
+  "analysis_removals_from_selected": 212,
+  "pooled_price_q99_eur": 1090.5800000000017,
+  "pooled_price_q99_quantile": 0.99,
+  "pooled_price_q99_rows_removed": 212,
+  "pooled_price_q99_pct_removed": 1.0013225014169658,
+  "primary_rows_2023": 8489,
+  "primary_rows_2024": 12471,
+  "primary_listings_all_four_months": 2352
 }

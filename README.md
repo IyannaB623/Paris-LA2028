@@ -8,6 +8,8 @@ This repository contains the DSO 510 Paris Airbnb analysis comparing July–Augu
 
 The primary analysis uses three OLS models on the same listing-month sample: occupancy on price; occupancy on price and an entire-home control; and occupancy on price, the 2024 indicator, their interaction, and the control. Standard errors are clustered by listing ID.
 
+Following the professor's guidance, the primary sample excludes listing-month prices above the pooled 99th percentile (€1,090.58/night), calculated once across both study years and applied identically to each. This removes 212 of 21,172 valid observations, leaving 20,960 listing-months from 8,127 listings. Full valid-sample results are retained as sensitivity comparisons. `final_analysis/presentation_results.md` provides slide-ready findings and interpretation.
+
 **Supporting question:** Did average recorded gross revenue per listing increase or decrease in July–August 2024 compared with July–August 2023? The revenue analysis compares listing-month means and medians, revenue per calendar night, and the same listings observed in all four study months. These are observational comparisons of recorded gross revenue, not profit or causal effects.
 
 ## Dataset source and obtaining the raw data

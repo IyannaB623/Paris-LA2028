@@ -112,10 +112,16 @@ issues["all_four_month_listings"] = int((s.groupby(ID)[DATE].nunique()==4).sum()
 issues["all_four_month_rows"] = int((s.groupby(ID)[DATE].nunique()==4).sum()*4)
 
 # Key uniqueness and required outcome/price/type valid; preserve valid zero occupancy,
-# active=False rows and high prices. Do not condition on active status.
-clean=s.drop_duplicates([ID,DATE],keep="first").copy()
-valid=clean[ID].notna()&clean[DATE].notna()&clean[Y].notna()&clean[PRICE].notna()&clean.room_type.notna()&(clean[PRICE]>0)&clean[Y].between(0,1)
-clean=clean.loc[valid].copy()
+# active=False rows and all prices in the reference sample. Do not condition on active status.
+full_clean=s.drop_duplicates([ID,DATE],keep="first").copy()
+valid=full_clean[ID].notna()&full_clean[DATE].notna()&full_clean[Y].notna()&full_clean[PRICE].notna()&full_clean.room_type.notna()&(full_clean[PRICE]>0)&full_clean[Y].between(0,1)
+full_clean=full_clean.loc[valid].copy()
+# Calculate the pooled threshold once, then apply the identical price cutoff in each year.
+q99=float(full_clean["price_eur"].quantile(.99))
+full_clean["price_above_pooled_q99"] = full_clean["price_eur"].gt(q99)
+full_clean["in_primary_trimmed_sample"] = ~full_clean["price_above_pooled_q99"]
+clean=full_clean.loc[full_clean["price_eur"].le(q99)].copy()
+full_clean.to_csv(OUT/"full_valid_analysis.csv",index=False,date_format="%Y-%m-%d")
 clean.to_csv(OUT/"cleaned_analysis.csv",index=False,date_format="%Y-%m-%d")
 
 dictionary=pd.DataFrame([
@@ -137,46 +143,59 @@ dictionary=pd.DataFrame([
  ["native_avg_daily_rate","native currency/night","Selected EUR rate, assuming native currency follows currency field; documentation incomplete."],
  ["revenue","source currency","Source gross-revenue measure; currency/conversion semantics are not documented for this exact file; preserved for comparison."],
  ["native_revenue","native currency","Source native gross-revenue measure; used as EUR because selected rows report currency=EUR, under an explicit assumption."],
+ ["price_above_pooled_q99","0/1","True when native price exceeds the pooled full-study-sample 99th percentile; cutoff is applied identically to both years."],
+ ["in_primary_trimmed_sample","0/1","True when native price is at or below the pooled q99 cutoff; rows above are excluded from primary regressions."],
 ],columns=["variable","units_or_coding","definition"])
 dictionary.to_csv(OUT/"variable_dictionary.csv",index=False)
 
-# Full descriptive stats and period counts for the actual common regression sample.
+# Descriptives identify the trimmed primary sample and preserve full-sample rows
+# as a clearly labeled sensitivity comparison.
 def desc(df,label):
  rows=[]
  for v in ["price_eur",Y,CONTROL]:
   z=df[v].dropna(); rows.append(dict(sample=label,variable=v,n=len(z),mean=z.mean(),median=z.median(),sample_sd=z.std(ddof=1),minimum=z.min(),maximum=z.max()))
  return rows
-descs=desc(clean,"Full valid analysis sample")
-for period,g in clean.groupby("period",sort=True): descs += desc(g,period)
+PRIMARY_LABEL="Primary (pooled top 1% price excluded)"
+FULL_LABEL="Full valid sample (sensitivity)"
+descs=desc(clean,PRIMARY_LABEL)
+for period,g in clean.groupby("period",sort=True): descs += desc(g,f"{period} — primary trimmed")
+descs += desc(full_clean,FULL_LABEL)
+for period,g in full_clean.groupby("period",sort=True): descs += desc(g,f"{period} — full sample sensitivity")
 pd.DataFrame(descs).to_csv(OUT/"descriptive_statistics.csv",index=False)
 counts=clean.groupby("period").agg(observations=(ID,"size"),distinct_listings=(ID,"nunique")).reset_index()
 counts.to_csv(OUT/"period_counts.csv",index=False)
+full_counts=full_clean.groupby("period").agg(observations=(ID,"size"),distinct_listings=(ID,"nunique")).reset_index()
+full_counts.to_csv(OUT/"period_counts_full_sensitivity.csv",index=False)
 
 models=[("Model 1",["const","price_per_100_eur"]),
  ("Model 2",["const","price_per_100_eur","entire_home"]),
  ("Model 3",["const","price_per_100_eur","period_2024","price_x_2024","entire_home"])]
 tables=[]; fits={}
-for name,terms in models:
- b,cov,t,r2=fit_cluster(clean,terms,name); tables+=t; fits[name]=(b,cov,terms)
+for sample_label,frame in [(PRIMARY_LABEL,clean),(FULL_LABEL,full_clean)]:
+ for name,terms in models:
+  b,cov,t,r2=fit_cluster(frame,terms,name)
+  for item in t: item["analysis_sample"]=sample_label
+  tables+=t; fits[(sample_label,name)]=(b,cov,terms)
 pd.DataFrame(tables).to_csv(OUT/"regression_coefficients.csv",index=False)
 
 # Model 3 linear combinations with covariance-based SE and cluster df.
-b,cov,terms=fits["Model 3"]; ix={v:i for i,v in enumerate(terms)}; df=clean[ID].nunique()-1; crit=tcrit95(df)
 contrasts=[]
-for label,vec in [("2023 price slope",{"price_per_100_eur":1}),
- ("2024 price slope",{"price_per_100_eur":1,"price_x_2024":1}),
- ("2024 minus 2023 slope",{"price_x_2024":1})]:
- v=np.zeros(len(terms))
- for term,val in vec.items(): v[ix[term]]=val
- est=float(v@b); se=float(math.sqrt(v@cov@v)); t=est/se; p=2*(1-tcdf(abs(t),df))
- contrasts.append(dict(contrast=label,estimate=est,cluster_se=se,p_value=p,ci95_low=est-crit*se,ci95_high=est+crit*se,units="occupancy percentage points per €100"))
+for sample_label,frame in [(PRIMARY_LABEL,clean),(FULL_LABEL,full_clean)]:
+ b,cov,terms=fits[(sample_label,"Model 3")]; ix={v:i for i,v in enumerate(terms)}; df=frame[ID].nunique()-1; crit=tcrit95(df)
+ for label,vec in [("2023 price slope",{"price_per_100_eur":1}),
+  ("2024 price slope",{"price_per_100_eur":1,"price_x_2024":1}),
+  ("2024 minus 2023 slope",{"price_x_2024":1})]:
+  v=np.zeros(len(terms))
+  for term,val in vec.items(): v[ix[term]]=val
+  est=float(v@b); se=float(math.sqrt(v@cov@v)); t=est/se; p=2*(1-tcdf(abs(t),df))
+  contrasts.append(dict(analysis_sample=sample_label,contrast=label,estimate=est,cluster_se=se,p_value=p,ci95_low=est-crit*se,ci95_high=est+crit*se,units="occupancy percentage points per €100"))
 pd.DataFrame(contrasts).to_csv(OUT/"model3_slopes.csv",index=False)
 
-# Sensitivities keep all model fields and same OLS specification.
-q99=clean.price_eur.quantile(.99)
+# Supplementary balanced-panel sensitivity: a listing must retain all four rows
+# after the pooled price trim. Full-sample balanced panel retained for comparison.
 sens=[]
-for label,frame in [("Main full valid sample",clean),("Exclude top 1% by price",clean[clean.price_eur<=q99]),
- ("Listings observed in all four months",clean[clean.groupby(ID)[DATE].transform("nunique")==4])]:
+for label,frame in [("Trimmed primary: listings observed in all four months",clean[clean.groupby(ID)[DATE].transform("nunique")==4]),
+ ("Full sample sensitivity: listings observed in all four months",full_clean[full_clean.groupby(ID)[DATE].transform("nunique")==4])]:
  b2,c2,t2,r2=fit_cluster(frame,models[2][1],label)
  sens += t2
  # Add the 2023 and 2024 simple slopes plus difference from covariance.
@@ -194,11 +213,20 @@ from matplotlib.ticker import PercentFormatter, FuncFormatter
 colors={"July–August 2023":"#4C78A8","July–August 2024":"#E15759"}
 plt.rcParams.update({"font.size":11,"axes.titlesize":15,"figure.dpi":140})
 def save(fig,name):
- fig.text(.01,.01,"Source: past_rates.csv | listing-month observations | full valid analysis sample unless noted",fontsize=8,color="#555")
+ fig.text(.01,.01,"Source: past_rates.csv | listing-month observations | primary sample excludes prices above pooled q99 unless noted",fontsize=8,color="#555")
  fig.tight_layout(rect=(0,.04,1,1)); fig.savefig(OUT/name,dpi=300,bbox_inches="tight",facecolor="white"); plt.close(fig)
+fig,ax=plt.subplots(figsize=(9,5.5))
+ax.hist(full_clean.price_eur,bins=70,color="#4C78A8",edgecolor="white",linewidth=.3)
+ax.axvline(q99,color="#D95B5B",linewidth=2.2,linestyle="--",label=f"Pooled 99th percentile = €{q99:,.2f}")
+ax.set(title=f"Full study sample native-currency nightly prices (N={len(full_clean):,})",
+       xlabel="native_avg_daily_rate (EUR assumed; per night)",ylabel="Listing-month observations")
+ax.xaxis.set_major_formatter(FuncFormatter(lambda x,_:f"€{x:,.0f}")); ax.legend(frameon=False,loc="upper right")
+ax.text(.99,.82,f"Cutoff computed once from pooled 2023–2024 sample.\nExclude {len(full_clean)-len(clean):,} observations above cutoff in both periods.",
+        transform=ax.transAxes,ha="right",va="top",fontsize=9,color="#555")
+save(fig,"price_histogram_pooled_q99.png")
 fig,ax=plt.subplots(figsize=(9,6))
 for p,g in clean.groupby("period",sort=True): ax.scatter(g.price_eur,g[Y],s=9,alpha=.18,label=f"{p} (n={len(g):,})",c=colors[p],edgecolors="none")
-ax.set(title=f"Monthly occupancy vs. nightly price (N={len(clean):,}; {clean[ID].nunique():,} listings)",xlabel="Average nightly price (EUR per night)",ylabel="Monthly occupancy")
+ax.set(title=f"Monthly occupancy vs. price: primary trimmed sample (N={len(clean):,}; {clean[ID].nunique():,} listings)",xlabel="Native average nightly price (EUR assumed per night)",ylabel="Monthly occupancy")
 ax.yaxis.set_major_formatter(PercentFormatter(1)); ax.xaxis.set_major_formatter(FuncFormatter(lambda x,_:f"€{x:,.0f}")); ax.legend(frameon=False); save(fig,"scatter_occupancy_price.png")
 fig,axes=plt.subplots(1,2,figsize=(10,5))
 for ax,(v,title) in zip(axes,[("price_eur","Nightly price"),(Y,"Occupancy")]):
@@ -215,48 +243,56 @@ for i,(p,val) in enumerate(means.items()): ax.text(i,val+.015,f"{val:.1%}\nn={in
 save(fig,"period_mean_occupancy.png")
 
 # Human-readable accounting and concise summary generated from saved results.
-issues.update({"analysis_sample_rows":len(clean),"analysis_sample_distinct_listings":int(clean[ID].nunique()),"analysis_removals_from_selected":len(s)-len(clean),"price_top_1pct_threshold_eur":float(q99)})
+period_counts_primary=clean.groupby("period").agg(observations=(ID,"size"),distinct_listings=(ID,"nunique"))
+trimmed_rows=int(len(full_clean)-len(clean))
+issues.update({"full_valid_sample_rows":len(full_clean),"full_valid_sample_distinct_listings":int(full_clean[ID].nunique()),
+ "analysis_sample_rows":len(clean),"analysis_sample_distinct_listings":int(clean[ID].nunique()),
+ "analysis_removals_from_selected":trimmed_rows,"pooled_price_q99_eur":q99,
+ "pooled_price_q99_quantile":0.99,"pooled_price_q99_rows_removed":trimmed_rows,
+ "pooled_price_q99_pct_removed":100*trimmed_rows/len(full_clean),
+ "primary_rows_2023":int((clean.period_2024==0).sum()),"primary_rows_2024":int((clean.period_2024==1).sum()),
+ "primary_zero_occupancy":int(clean[Y].eq(0).sum()),
+ "primary_listings_all_four_months":int((clean.groupby(ID)[DATE].nunique()==4).sum())})
 (OUT/"data_quality.json").write_text(json.dumps(issues,indent=2,default=str))
 coef=pd.DataFrame(tables); contrast=pd.DataFrame(contrasts); statdf=pd.DataFrame(descs)
-def get(model,term,col="coefficient"): return float(coef[(coef.model==model)&(coef.term==term)][col].iloc[0])
-def cget(term,col): return float(contrast[contrast.contrast==term][col].iloc[0])
-summary=f'''# Team summary: Paris Airbnb price and occupancy
+def get(sample,model,term,col="coefficient"):
+ return float(coef[(coef.analysis_sample==sample)&(coef.model==model)&(coef.term==term)][col].iloc[0])
+def cget(sample,term,col):
+ return float(contrast[(contrast.analysis_sample==sample)&(contrast.contrast==term)][col].iloc[0])
+def citable(sample,model,term):
+ return f"{get(sample,model,term):+.3f} pp/€100 (p={get(sample,model,term,'p_value'):.3g}; 95% CI {get(sample,model,term,'ci95_low'):+.3f} to {get(sample,model,term,'ci95_high'):+.3f})"
+p23=int(period_counts_primary.loc["July–August 2023","observations"]); p24=int(period_counts_primary.loc["July–August 2024","observations"])
+trim_slope_diff=cget(PRIMARY_LABEL,"2024 minus 2023 slope","estimate")
+full_slope_diff=cget(FULL_LABEL,"2024 minus 2023 slope","estimate")
+summary=f'''# Team summary: Paris Airbnb pricing, occupancy, and revenue
 
-## Findings
+## Primary analysis: pooled top-1% price excluded
 
-The analysis uses {len(clean):,} valid listing-months from {clean[ID].nunique():,} listings: {int((clean.period_2024==0).sum()):,} observations in July–August 2023 and {int((clean.period_2024==1).sum()):,} in July–August 2024. Model 1 estimates {get('Model 1','price_per_100_eur'):+.3f} occupancy percentage points per €100 (p={get('Model 1','price_per_100_eur','p_value'):.3g}; 95% CI {get('Model 1','price_per_100_eur','ci95_low'):+.3f} to {get('Model 1','price_per_100_eur','ci95_high'):+.3f}). Model 2 estimates {get('Model 2','price_per_100_eur'):+.3f} points (p={get('Model 2','price_per_100_eur','p_value'):.3g}; 95% CI {get('Model 2','price_per_100_eur','ci95_low'):+.3f} to {get('Model 2','price_per_100_eur','ci95_high'):+.3f}); the slope moved slightly more negative as expected, but neither baseline slope is distinguishable from zero at 5%.
+The pooled 99th-percentile cutoff is **€{q99:,.2f} per night**, calculated once from all {len(full_clean):,} valid July–August 2023/2024 listing-months using `native_avg_daily_rate`. We apply this same cutoff to both years and exclude {trimmed_rows:,} rows ({trimmed_rows/len(full_clean):.2%}), leaving **{len(clean):,} listing-months from {clean[ID].nunique():,} listings**: {p23:,} in 2023 and {p24:,} in 2024. The histogram `price_histogram_pooled_q99.png` shows the full native-price distribution and cutoff. The trimmed sample is now primary; the full valid sample remains a sensitivity comparison.
 
-In Model 3, the estimated price slope is {cget('2023 price slope','estimate'):+.3f} occupancy percentage points per €100 in 2023 (95% CI {cget('2023 price slope','ci95_low'):+.3f} to {cget('2023 price slope','ci95_high'):+.3f}; p={cget('2023 price slope','p_value'):.3g}) and {cget('2024 price slope','estimate'):+.3f} points in 2024 (95% CI {cget('2024 price slope','ci95_low'):+.3f} to {cget('2024 price slope','ci95_high'):+.3f}; p={cget('2024 price slope','p_value'):.3g}). The 2024-minus-2023 slope difference is {cget('2024 minus 2023 slope','estimate'):+.3f} points (95% CI {cget('2024 minus 2023 slope','ci95_low'):+.3f} to {cget('2024 minus 2023 slope','ci95_high'):+.3f}; p={cget('2024 minus 2023 slope','p_value'):.3g}); equal slopes cannot be rejected. Slopes are small and statistically uncertain. These are associations, not causal effects.
+Model 1 price estimate: {citable(PRIMARY_LABEL,'Model 1','price_per_100_eur')}. Model 2, adding the entire-home control: {citable(PRIMARY_LABEL,'Model 2','price_per_100_eur')}. Model 3 interaction coefficient: {citable(PRIMARY_LABEL,'Model 3','price_x_2024')}.
 
-## Data and correction to preliminary slides
+In Model 3, the 2023 price slope is {cget(PRIMARY_LABEL,'2023 price slope','estimate'):+.3f} occupancy percentage points per €100 (p={cget(PRIMARY_LABEL,'2023 price slope','p_value'):.3g}; 95% CI {cget(PRIMARY_LABEL,'2023 price slope','ci95_low'):+.3f} to {cget(PRIMARY_LABEL,'2023 price slope','ci95_high'):+.3f}); the 2024 slope is {cget(PRIMARY_LABEL,'2024 price slope','estimate'):+.3f} (p={cget(PRIMARY_LABEL,'2024 price slope','p_value'):.3g}; 95% CI {cget(PRIMARY_LABEL,'2024 price slope','ci95_low'):+.3f} to {cget(PRIMARY_LABEL,'2024 price slope','ci95_high'):+.3f}). The difference (2024 minus 2023) is {trim_slope_diff:+.3f} (p={cget(PRIMARY_LABEL,'2024 minus 2023 slope','p_value'):.3g}; 95% CI {cget(PRIMARY_LABEL,'2024 minus 2023 slope','ci95_low'):+.3f} to {cget(PRIMARY_LABEL,'2024 minus 2023 slope','ci95_high'):+.3f}). All three required regressions use this same trimmed sample and listing-clustered standard errors.
 
-The raw source has {raw_n:,} monthly rows and {raw_ids:,} distinct listing IDs. The July–August 2023/2024 sample has {len(s):,} rows and {s[ID].nunique():,} listings, not 9,114 listings; 9,114 is the full-source distinct-listing count. The period split is {int((s.period_2024==0).sum()):,} in 2023 and {int((s.period_2024==1).sum()):,} in 2024. Rows are listing-months, not independent listings.
+## How the findings compare with the original hypotheses
 
-The preliminary analysis called `avg_daily_rate` EUR. All selected rows say currency EUR, and the source also supplies `native_avg_daily_rate`; these fields differ (median all-field/native ratio {float((s.avg_daily_rate/s.native_avg_daily_rate).median()):.3f}). The source documentation available here does not define the conversion basis of `avg_daily_rate`. We therefore use `native_avg_daily_rate` as EUR/night based on its native-currency name plus the EUR currency field, explicitly as an assumption; the analogous published schema describes the native rate as the average daily rate in native currency, but does not document the exact Kaggle file's conversion. Both fields remain in the cleaned data for comparison. Replacing the preliminary rate field revises mean rates from €203.86 to €185.99 (2023) and €277.12 to €257.51 (2024), and medians from €141.70 to €129 and €203.85 to €189. Occupancy figures are unchanged. Recompute/replace earlier price descriptives before presenting them.
+The preliminary claim asked whether higher nightly prices reduce bookings more during the 2024 Olympic period than in the ordinary-summer baseline. Theory offered two competing expectations: event demand and fewer substitutes could weaken price sensitivity, while an influx of supply or overpricing could strengthen a negative price–occupancy relationship. In the trimmed sample both estimated period-specific slopes are positive; higher listed prices are associated with higher occupancy in each period, not lower occupancy. The 2024 slope is significantly lower than the 2023 slope, so the equal-slope null is rejected at 5%. That downward shift is directionally consistent with stronger relative price sensitivity in 2024, but the positive slopes do not show that higher prices reduced occupancy in either year. These are observational associations, not causal effects or preregistered expectations.
 
-## Data handling
+## Full-sample sensitivity
 
-No selected rows were excluded for zero occupancy or `active=False`: occupancy is a supplied monthly 0–1 measure, but its denominator and active flag timing are undocumented; inactive rows sometimes have positive occupancy and active rows sometimes have zero occupancy. We retain both, avoiding selection based on an ambiguous status. No selected rows have missing outcome, price, or room type; occupancy is bounded, prices are positive, and selected listing-month keys are unique. High-price observations remain in the main sample. Bedrooms are not included: {int(s.bedrooms.isna().sum()):,} ({s.bedrooms.isna().mean():.1%}) are missing and values reach {s.bedrooms.max():.0f}, weakening comparability. Entire-home status is the common control because whole homes can command higher rates and meet different group/travel needs affecting demand; it is fully observed and defined consistently. Keep the same sample across all three models.
+The full valid sample uses all {len(full_clean):,} rows and {full_clean[ID].nunique():,} listings. Model 1 price estimate: {citable(FULL_LABEL,'Model 1','price_per_100_eur')}; Model 2: {citable(FULL_LABEL,'Model 2','price_per_100_eur')}; Model 3 interaction: {citable(FULL_LABEL,'Model 3','price_x_2024')}. Full-sample Model 3 slopes are {cget(FULL_LABEL,'2023 price slope','estimate'):+.3f} pp/€100 in 2023 (p={cget(FULL_LABEL,'2023 price slope','p_value'):.3g}; 95% CI {cget(FULL_LABEL,'2023 price slope','ci95_low'):+.3f} to {cget(FULL_LABEL,'2023 price slope','ci95_high'):+.3f}) and {cget(FULL_LABEL,'2024 price slope','estimate'):+.3f} in 2024 (p={cget(FULL_LABEL,'2024 price slope','p_value'):.3g}; 95% CI {cget(FULL_LABEL,'2024 price slope','ci95_low'):+.3f} to {cget(FULL_LABEL,'2024 price slope','ci95_high'):+.3f}); difference {full_slope_diff:+.3f} (p={cget(FULL_LABEL,'2024 minus 2023 slope','p_value'):.3g}; 95% CI {cget(FULL_LABEL,'2024 minus 2023 slope','ci95_low'):+.3f} to {cget(FULL_LABEL,'2024 minus 2023 slope','ci95_high'):+.3f}). Comparing these estimates shows whether trimming changes magnitudes, intervals, and inference. Balanced four-month results are in `sensitivity_results.csv` as supplementary analyses.
 
-## Interpretation and limitations
+## Data decisions and limitations
 
-Theory gives competing predictions. A ticket-driven demand shock and fewer substitutes could flatten price sensitivity in 2024; a surge in supply or overpricing could make the negative association stronger. Neither was preregistered. For hosts, the slope gives a descriptive average association per €100, not an exact optimal LA price.
-
-Unobserved location, quality, amenities, booking timing, minimum-stay rules, and availability may affect both prices and occupancy. For example, desirable/high-quality homes can set higher prices and attract more bookings, biasing the price slope upward (less negative or more positive) relative to a causal price effect. Conversely, hosts may raise prices in response to expected demand, also pushing the association upward. Monthly aggregation covers dates outside the Games, and the panel is unbalanced; listing composition changes between years. Clustered standard errors account for repeated observations of the same listing but do not remove confounding.
-
-The top-1% price sensitivity changes the inference: after dropping 212 observations above €{q99:,.2f}, the slopes are {float(pd.DataFrame(sens).query("model == 'Exclude top 1% by price' and term == '2023 slope'").coefficient.iloc[0]):+.3f} points for 2023 and {float(pd.DataFrame(sens).query("model == 'Exclude top 1% by price' and term == '2024 slope'").coefficient.iloc[0]):+.3f} for 2024, with a slope difference of {float(pd.DataFrame(sens).query("model == 'Exclude top 1% by price' and term == 'slope difference'").coefficient.iloc[0]):+.3f} points (p={float(pd.DataFrame(sens).query("model == 'Exclude top 1% by price' and term == 'slope difference'").p_value.iloc[0]):.3g}). The top-price sensitivity therefore produces a statistically detectable negative difference that is absent in the main sample, while both estimated group slopes remain positive. In the balanced four-month panel (9,628 rows, 2,407 listings), the slope difference is {float(pd.DataFrame(sens).query("model == 'Listings observed in all four months' and term == 'slope difference'").coefficient.iloc[0]):+.3f} (p={float(pd.DataFrame(sens).query("model == 'Listings observed in all four months' and term == 'slope difference'").p_value.iloc[0]):.3g}), consistent with the main result. A balanced panel is selected toward listings continuously represented in the source and is not automatically more representative.
-
-## Theory-based expectations for slides
-
-Model 1 tests a zero price slope. Model 2 uses entire-home as a confounder proxy; controlling for property type could make the price slope more negative if whole homes are simultaneously costlier and more occupied. Model 3 tests equal slopes; demand-shock theory predicts a weaker negative association in 2024, while overpricing/supply-saturation predicts a stronger negative association. State these as theoretical expectations, not preregistered hypotheses.
+The price field is `native_avg_daily_rate`, treated as EUR because every selected source row reports EUR. The exact Kaggle field-level currency definition is incomplete; this assumption is preserved. Price cutoff is on that same native-currency field. We retain genuine zero occupancy and do not filter on the ambiguous active flag. Bedrooms remains excluded because 13.3% are missing and some values are implausibly high; entire-home is the common control. Location, quality, amenities, timing, availability, and listing composition can affect both price and occupancy; monthly data cannot isolate Olympic dates. Better located or higher-quality listings may have both higher prices and higher occupancy, biasing price associations upward. Clustered errors address repeated listing observations but do not remove confounding.
 '''
 (OUT/"team_summary.md").write_text(summary)
 
 readme=f'''# Reproducible analysis
 
-Run `python3 final_analysis/run_analysis.py`, then `python3 final_analysis/analyze_revenue.py`, then `python3 build_dashboard.py` from the project root (or run each script by absolute path). The first script reads `past_rates.csv`; the revenue script reads the prepared analysis CSV; both write only into `final_analysis/`. The final command rebuilds `analysis_output/dashboard.html`. Environment: Python {platform.python_version()}, pandas {pd.__version__}, numpy {np.__version__}. `statsmodels` and `scipy` are unavailable in the supplied environment, so OLS and listing-clustered sandwich standard errors are computed directly with NumPy; p-values and t confidence intervals use the Student t distribution with listing-cluster degrees of freedom, calculated by the included incomplete-beta routine.
+Run `python3 final_analysis/run_analysis.py`, then `python3 final_analysis/analyze_revenue.py`, then `python3 build_dashboard.py` from the project root (or run each script by absolute path). The analysis script reads `past_rates.csv` and writes into `final_analysis/`. It calculates the native-price 99th percentile once across the pooled valid four-month sample ({len(full_clean):,} rows), then applies the same €{q99:,.2f} cutoff in 2023 and 2024. The primary cleaned CSV has {len(clean):,} rows and {clean[ID].nunique():,} listings; `full_valid_analysis.csv` retains the full sample for sensitivity comparisons. Environment: Python {platform.python_version()}, pandas {pd.__version__}, numpy {np.__version__}. `statsmodels` and `scipy` are unavailable in the supplied environment, so OLS and listing-clustered sandwich standard errors are computed directly with NumPy; inference uses Student t with listing-cluster degrees of freedom.
 
-Files include `cleaned_analysis.csv`, `variable_dictionary.csv`, descriptive and regression CSV tables, sensitivity table, data-quality JSON, analysis PNGs, and `team_summary.md`. The supporting revenue script adds `revenue_comparison.csv`, `revenue_data_quality.json`, `revenue_comparison.png`, `revenue_presentation_paragraph.md`, and `revenue_method_notes.md`. Analysis sample: {len(clean):,} rows, {clean[ID].nunique():,} listings. Main models use the identical complete valid sample. Price and revenue use native-currency fields as EUR under explicit assumptions. Sensitivity specifications re-estimate Model 3.
+Outputs include primary and full-sample descriptive/regression tables, period counts, slope contrasts, balanced-panel sensitivity results, data-quality JSON, the full-price histogram with cutoff, trimmed-sample charts, notebook, and team summary. The revenue script saves trimmed primary comparisons and clearly labeled supplementary full-sample comparisons. Price and revenue use native-currency fields as EUR under explicit assumptions. Dashboard charts are embedded in `analysis_output/dashboard.html`.
 '''
 (OUT/"README.md").write_text(readme)
 print(f"Raw {raw_n:,}, raw listings {raw_ids:,}; selected {len(s):,} rows, {s[ID].nunique():,} IDs; analysis {len(clean):,} rows, {clean[ID].nunique():,} IDs")
