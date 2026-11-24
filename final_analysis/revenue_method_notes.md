@@ -1,0 +1,7 @@
+# Revenue field and analysis notes
+
+The source contains `revenue` and `native_revenue`. In the study sample, all 21,172 rows have `currency=EUR`; the revenue fields are not equal and the median `revenue / native_revenue` ratio is 1.079. The analysis therefore uses `native_revenue` as the euro-denominated field, consistently with the price analysis. This is an explicit assumption because the exact Kaggle file does not provide readable field-level definitions. An analogous published AirROI past-calendar schema defines revenue as total generated and native revenue as generated in native currency. Source: https://www.airroi.com/data-portal/markets/paris-france (past calendar rates schema).
+
+`available_days` was not used in the denominator. Here `available_days` and `unavailable_days` sum to calendar days and occupancy is mechanically aligned with unavailable days; they should not be mistaken for booked nights. The per-calendar-night measure is `native_revenue / days_in_month`.
+
+Missing `native_revenue` is not imputed. A missing value is excluded from the revenue-only comparison; zeros are retained. Main-sample monthly averages weight each available listing-month equally. The matched sample includes only listings with all four July/August 2023/2024 rows and nonmissing valid revenue; July and August are averaged within listing-year, then the same 2,407 listing IDs are compared across years. These summaries compare per-listing amounts rather than market totals and are observational, with no causal inference or price optimization claim.

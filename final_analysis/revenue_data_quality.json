@@ -1,0 +1,22 @@
+{
+  "study_listing_month_rows": 21172,
+  "study_listings": 8179,
+  "currency_values": {
+    "EUR": 21172
+  },
+  "native_revenue_missing_rows": 0,
+  "revenue_missing_rows": 0,
+  "native_revenue_zero_rows_retained": 8801,
+  "native_revenue_negative_rows": 0,
+  "native_revenue_min": 0.0,
+  "native_revenue_max": 78748.0,
+  "median_revenue_to_native_revenue_ratio": 1.0787518573551262,
+  "native_revenue_gt_zero_and_occupancy_zero": 0,
+  "native_revenue_zero_and_occupancy_gt_zero": 0,
+  "valid_revenue_listing_months": 21172,
+  "valid_revenue_listings": 8179,
+  "matched_all_four_month_listings": 2407,
+  "matched_listing_years": 4814,
+  "revenue_missing_sample_rows_excluded": 0,
+  "available_days_not_used_as_denominator": true
+}

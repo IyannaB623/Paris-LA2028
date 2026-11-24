@@ -1,0 +1,19 @@
+variable,units_or_coding,definition
+listing_id,string,Source listing ID preserved verbatim; clustering unit.
+month_date,YYYY-MM-DD,First day of the source month.
+period,category,July–August 2023 or July–August 2024.
+period_2024,0/1,1 for July–August 2024; 0 for July–August 2023.
+occupancy,"fraction, 0–1",Monthly occupancy supplied by source; genuine zeros retained.
+price_eur,EUR/night,native_avg_daily_rate; native currency is EUR for every selected row.
+price_all_currency_field,Source currency units/night,avg_daily_rate retained for comparison; currency semantics undocumented.
+price_difference_all_minus_native,Source units minus EUR,avg_daily_rate minus native_avg_daily_rate.
+price_per_100_eur,EUR/100,"price_eur divided by 100, so price slope is pp occupancy per €100."
+room_type,category,Source room_type.
+entire_home,0/1,1 when room_type=entire_home; 0 otherwise.
+bedrooms,bedrooms,Candidate excluded from primary models due to missingness and implausible values.
+active,boolean,"Source monthly active flag; retained as a descriptive quality field, not exclusion rule."
+currency,ISO code,"Source field, EUR in all selected rows."
+avg_daily_rate,undocumented units/night,"Second source price field; preserved, not selected as EUR main predictor."
+native_avg_daily_rate,native currency/night,"Selected EUR rate, assuming native currency follows currency field; documentation incomplete."
+revenue,source currency,Source gross-revenue measure; currency/conversion semantics are not documented for this exact file; preserved for comparison.
+native_revenue,native currency,"Source native gross-revenue measure; used as EUR because selected rows report currency=EUR, under an explicit assumption."

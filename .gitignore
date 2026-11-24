@@ -1,0 +1,37 @@
+# Raw datasets (download locally from Kaggle; never commit them)
+/past_rates.csv
+/past_rates.parquet
+/listings.parquet
+/listings_monthly.csv
+/raw_data/
+
+# Python environments, caches, notebooks, and temporary outputs
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+**/.mplconfig/
+.pytest_cache/
+.DS_Store
+*.tmp
+*.temp
+*.log
+
+# Credentials and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+.aws/
+
+# The previous descriptive files are superseded; retain only the final dashboard.
+/analysis_output/*
+!/analysis_output/dashboard.html
+
+# Superseded preliminary analysis (uses the unverified price-field assumption)
+/analyze_descriptives.py
